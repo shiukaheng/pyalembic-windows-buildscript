@@ -68,7 +68,8 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
+          cache: pip
+          cache-dependency-path: setup.py      # ← add this line
 
       - name: Install native Linux build deps
         if: ${{ matrix.os == 'ubuntu-latest' && matrix.arch != 'manylinux' }}
