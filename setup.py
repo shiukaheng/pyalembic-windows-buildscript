@@ -5,21 +5,31 @@ import subprocess
 from setuptools import find_packages, setup
 from setuptools.command.install import install
 
+import sys
+
 
 class CustomInstallCommand(install):
     def run(self):
         super().run()
 
         # Copy all dependent binaries to the package directory
-        GLOB_PATTERNS = [
-            # *.pyd files
-            "alembic/_installed/lib/site-packages/*.pyd",
-            "Imath/_installed/lib/site-packages/*.pyd",
-            # *.dll files
-            "boost/stage/lib/*.dll",
-            "alembic/_installed/lib/*.dll",
-            "Imath/_installed/bin/*.dll",
-        ]
+        GLOB_PATTERNS = []
+
+        if sys.platform == "win32":
+            GLOB_PATTERNS += [
+                "alembic/_installed/lib/site-packages/*.pyd",
+                "Imath/_installed/lib/site-packages/*.pyd",
+                "boost/stage/lib/*.dll",
+                "alembic/_installed/lib/*.dll",
+                "Imath/_installed/bin/*.dll",
+            ]
+        else:   # Linux & macOS
+            GLOB_PATTERNS += [
+                "alembic/_installed/lib/python_site/*.so",
+                "Imath/_installed/lib/*.so",
+                "boost/stage/lib/*.so*",
+            ]
+
 
         for pattern in GLOB_PATTERNS:
             for rel_path in glob.glob(pattern):

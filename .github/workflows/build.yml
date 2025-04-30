@@ -1,52 +1,137 @@
 name: Build and Release
 
 on:
+  # manual trigger with an optional “publish” switch
   workflow_dispatch:
     inputs:
       runReleaseAction:
         description: "Run release action"
         required: false
         type: boolean
+  # build on pushes and version tags (comment out if you only want manual)
+  push:
+    branches: [main]
+    tags:     ['v*']
 
 permissions:
-  contents: write
-  
+  contents: write        # needed by softprops/action-gh-release
+
 jobs:
+# ───────────────────────────── build / test ─────────────────────────────
   build:
     runs-on: ${{ matrix.os }}
-    
     strategy:
+      fail-fast: false
       matrix:
-        os: ["windows-latest"]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
-        architecture: ['x64']
+        include:
+          # ── Windows quick builds ──
+          - os: windows-latest   # MSVC toolchain
+            python-version: "3.9"
+            arch: x64
+          - os: windows-latest
+            python-version: "3.10"
+            arch: x64
+          - os: windows-latest
+            python-version: "3.11"
+            arch: x64
+          - os: windows-latest
+            python-version: "3.12"
+            arch: x64
+
+          # ── Native Ubuntu sanity builds ──
+          - os: ubuntu-latest
+            python-version: "3.9"
+            arch: x64
+          - os: ubuntu-latest
+            python-version: "3.10"
+            arch: x64
+          - os: ubuntu-latest
+            python-version: "3.11"
+            arch: x64
+          - os: ubuntu-latest
+            python-version: "3.12"
+            arch: x64
+
+          # ── Binary wheel job (cibuildwheel in manylinux container) ──
+          - os: ubuntu-latest
+            python-version: "3.12"   # *driver* interpreter only
+            arch: manylinux
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v2
+      # --------------------------------------------------------------
+      - name: Checkout source
+        uses: actions/checkout@v4
 
-      - name: Set up Python  ${{ matrix.python-version }}
+      # ---------- native Windows / Ubuntu paths --------------------
+      - name: Set up Python
+        if: ${{ matrix.arch != 'manylinux' }}
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
-          architecture: ${{ matrix.architecture }}
+          cache: 'pip'
 
-      - name: Install Python dependencies
-        run: python -m pip install --upgrade pip setuptools wheel
+      - name: Install native Linux build deps
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.arch != 'manylinux' }}
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake git curl
 
-      - name: Build
+      - name: Build with platform script
+        if: ${{ matrix.arch != 'manylinux' }}
         run: |
-          $PythonRoot = (python -c "import os,sys; print(os.path.dirname(sys.executable))")
-          ./build.ps1 -PythonRoot $PythonRoot
-        shell: pwsh
-
-      - name: Compute the release tag
-        run: |
-          echo "release_tag=v`date '+%Y-%m-%d'`" >> $GITHUB_ENV
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ./build.ps1 -PythonRoot "$env:PYTHON"   # PowerShell
+          else
+            ./build.sh                              # Bash
+          fi
         shell: bash
-      - name: Release
-        if: ${{ inputs.runReleaseAction }}
+
+      # ---------- manylinux wheel production via cibuildwheel -------
+      - name: Build manylinux wheels
+        if: ${{ matrix.arch == 'manylinux' }}
+        uses: pypa/cibuildwheel@v2.18.1
+        env:
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-*"
+          CIBW_ARCHS: "x86_64 aarch64"
+          # run your build script inside the container *up to* wheel packaging
+          CIBW_BEFORE_BUILD: |
+            pip install ninja
+            ./build.sh SKIP_PACKAGING=1 SKIP_INSTALL=1
+          # audit & fix external library paths
+          CIBW_REPAIR_WHEEL_COMMAND: "auditwheel repair -w {dest_dir} {wheel}"
+          # smoke-test every resulting wheel
+          CIBW_TEST_COMMAND: |
+            python - << 'PY'
+            import alembic, os
+            print("Alembic OK →", alembic.Abc.GetLibraryVersion())
+            PY
+
+      # ---------- Collect artefacts from every matrix leg ----------
+      - name: Upload wheels
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.python-version }}-${{ matrix.arch }}
+          path: |
+            dist/*.whl
+            wheelhouse/*.whl
+          if-no-files-found: ignore
+
+# ───────────────────────────── release (optional) ───────────────────────────
+  release:
+    needs: build
+    if: ${{ github.event.inputs.runReleaseAction == 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all wheel artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Compute release tag (ISO date)
+        run: echo "release_tag=v$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ env.release_tag }}
-          files: ./dist/*.whl
+          files: dist/**/*.whl
